@@ -48,13 +48,14 @@ class mqtt2influx2b():
     #function called every time we receive a message
     def on_message(self, client, userdata, msg):
         print(msg.topic+" "+str(msg.payload))
-        player = msg.topic[1:7]
-        piezo = msg.topic[8:]
+        player = msg.topic[1:8]
+        piezo = msg.topic[9:]
+        piezo_value = int(msg.payload)
         
         #create influxdb point and send
-        point = Point("PiezoSignal").tag(player).field(piezo,float(msg.payload))
+        point = Point("PiezoSignal").tag("player",player).field(piezo,piezo_value)
         self.ifdb_client.write(point)
-    
+            
     def start(self):
         ''' 
         Starts listening to incoming mqtt messages.
@@ -73,7 +74,7 @@ class mqtt2influx2b():
 ######
 
 params = {
-    "mqtt_ip":'192.168.164.88',
+    "mqtt_ip":'192.168.164.153',
     "mqtt_port":1883, 
     "ifdb_tok":"ygYcYy950HBz1C1oj2oD6LUBfOyl-WiwkC47xiUPDfmJby3dv1DPlldTACZ1SXrJXjSoH97TZxNUcGKY5-XFdw==", 
     "ifdb_ipport":"http://localhost:8086", 
