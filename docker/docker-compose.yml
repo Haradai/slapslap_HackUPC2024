@@ -1,0 +1,31 @@
+version: '3'
+
+services:
+  mqtt:
+    image: eclipse-mosquitto
+    ports:
+      - "1883:1883"
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+
+  influxdb:
+    image: influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - INFLUXDB_DB=mydb
+      - INFLUXDB_ADMIN_USER=admin
+      - INFLUXDB_ADMIN_PASSWORD=password
+      - INFLUXDB_USER=myuser
+      - INFLUXDB_USER_PASSWORD=mypassword
+
+  python_processor:
+    build:
+      context: ./python_processor
+    depends_on:
+      - mqtt
+      - influxdb
+
