@@ -48,7 +48,7 @@ class mqtt2influx2b():
     #function called every time we receive a message
     def on_message(self, client, userdata, msg):
         print(msg.topic+" "+str(msg.payload))
-        player = msg.topic[1:7]
+        player = msg.topic[1:8]
         piezo = msg.topic[9:]
         piezo_value = int(msg.payload)
         
