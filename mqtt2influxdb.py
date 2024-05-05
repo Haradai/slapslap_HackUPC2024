@@ -54,7 +54,7 @@ class slap_game_service():
 
         self._game_states = ["Waiting users", "Ready","Attemting hit","Hit success", "Hit failure","Anomaly"]
         self.old_game_state = "Waiting users"
-        self.game_state = "Waiting" #Always start with rest
+        self.game_state = "Waiting users" #Always start with rest
         
 
         self.attempt_hit_start = datetime.now()
