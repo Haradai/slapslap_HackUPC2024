@@ -4,6 +4,7 @@ import numpy as np
 import ast
 from datetime import datetime
 from datetime import timedelta
+import time
 
 class slap_game_service():
     def __init__(self,mqtt_ip:str, mqtt_port:str, ifdb_tok:str, ifdb_ipport:str, ifdb_org:str, ifdb_db:str):
@@ -32,16 +33,16 @@ class slap_game_service():
 
         #CONFIG VARIABLES
         self.N_SENSORS_PER_GLOVE = 6
-        self.BUFFER_N_SAMPLES = 5
-        self.ATTEMPT_TIMEOUT_SEC = 3
+        self.BUFFER_N_SAMPLES = 2
+        self.ATTEMPT_TIMEOUT_SEC = 2
 
         #SENSING VARIABLES
         self.cap_values = {
             "Player1": np.zeros(shape=(self.N_SENSORS_PER_GLOVE, self.BUFFER_N_SAMPLES)),
             "Player2": np.zeros(shape=(self.N_SENSORS_PER_GLOVE, self.BUFFER_N_SAMPLES))
         } 
-        
-        #initially set to super big values to not see change
+    
+        #hit values buffer
         self.hits_buffer = {
             "Player1": np.zeros(shape=(self.N_SENSORS_PER_GLOVE, self.BUFFER_N_SAMPLES)),
             "Player2": np.zeros(shape=(self.N_SENSORS_PER_GLOVE, self.BUFFER_N_SAMPLES))
@@ -49,12 +50,14 @@ class slap_game_service():
 
         #GAME VARIABLES
         self._turns = ["Init", "Player1", "Player2"]
-        self.old_turn = "Init"
+        self.old_turn = ""
         self.turn = "Init" #Always player A starts
+        self.log_turn()
 
         self._game_states = ["Waiting users", "Ready","Attemting hit","Hit success", "Hit failure","Anomaly"]
-        self.old_game_state = "Waiting users"
+        self.old_game_state = ""
         self.game_state = "Waiting users" #Always start with rest
+        self.log_game_state()
         
 
         self.attempt_hit_start = datetime.now()
@@ -76,16 +79,11 @@ class slap_game_service():
         this is the live loop that is alive thanks to the 
         constant incoming values from mqtt sent by the esp32's
         '''
-        #report turn to influxdb and TODO: mqtt?
-        self.log_turn()
-
         #player sending message
         player = msg.topic[1:]
 
         #conert to dict the message
         sensor_load = ast.literal_eval(str(msg.payload)[2:-1])
-
-        print(sensor_load)
 
         sensor_values = sensor_load["Value"]
         sensor_hits = sensor_load["Binary"]
@@ -99,8 +97,11 @@ class slap_game_service():
         
         #save values to influxdb
         self.log_cap_vals(sensor_values, player)
-        self.log_cap_vals(sensor_hits, player, is_binary=True)
         
+        #if any hit log into influxdb
+        if np.any(sensor_hits):
+            self.log_cap_vals(sensor_hits, player, is_binary=True)
+
         self.update_hits_buffer(sensor_hits, player)
         
         #get hits sensing on both players
@@ -111,10 +112,17 @@ class slap_game_service():
         if self.game_state == "Waiting users":
             #check for both that last sensor (inside hand) is hit
             if hits_player1[0] and hits_player2[0] :
-                #put provisional tag to tell game is about to start
-                self.turn = "Starting turn"
-                self.log_turn()
+                print("Starting turn!")
+                #if first time playing
+                if self.turn == "Init":
+                    self.turn = "Player1"
+                    self.log_turn()
+
                 self.game_state = "Ready"
+                self.log_game_state()
+
+                #send to esp32 for comoddity purposes
+                self.mqttc.publish("/Turn",self.turn)  
 
         #actual game run (execissevely explicit for debugging purposes)
         else:
@@ -126,6 +134,7 @@ class slap_game_service():
                     #started going for a hit! or already going for a hit. If rest change to going for a hit
                     if self.game_state == "Ready":
                         self.game_state = "Attempting hit"
+                        self.log_game_state()
                         self.attempt_hit_start = datetime.now()
 
                     #if already attempting a hit check for contrary player hit or separate or attempt timeout
@@ -133,21 +142,24 @@ class slap_game_service():
                         #check adversary hit (all sensors minus last one)
                         if np.any(hits_player2[1:]):
                             self.game_state  = "Hit success"
+                            self.log_game_state()
 
                         else:
                             #if time elapsed is greater than timeout change to failure
                             elapsed = datetime.now() - self.attempt_hit_start
-                            if elapsed > timedelta(self.ATTEMPT_TIMEOUT_SEC):
+                            if elapsed > timedelta(seconds = self.ATTEMPT_TIMEOUT_SEC):
                                 self.game_state = "Hit failure"
+                                self.log_game_state()
                 
             if self.turn == "Player2":
-                if hits_player1[0]: #all sensors except last(inner hand sensor)
+                if hits_player2[0]: #all sensors except last(inner hand sensor)
                     pass
                     #still resting
                 else:
                     #started going for a hit! or already going for a hit. If rest change to going for a hit
                     if self.game_state == "Ready":
                         self.game_state = "Attempting hit"
+                        self.log_game_state()
                         self.attempt_hit_start = datetime.now()
 
                     #if already attempting a hit check for contrary player hit or separate or attempt timeout
@@ -155,30 +167,41 @@ class slap_game_service():
                         #check adversary hit (all sensors minus last one)
                         if np.any(hits_player1[1:]):
                             self.game_state  = "Hit success"
+                            self.log_game_state()
+                            print("Hit success!!!!")
 
                         else:
                             #if time elapsed is greater than timeout change to failure
                             elapsed = datetime.now() - self.attempt_hit_start
-                            if elapsed > timedelta(self.ATTEMPT_TIMEOUT_SEC):
+                            if elapsed > timedelta(seconds = self.ATTEMPT_TIMEOUT_SEC):
                                 self.game_state = "Hit failure"
-                
-            #logs iteration game state
-            self.log_game_state()
-            
+                                self.log_game_state()
+                                print("Hit failure")
+
             #get other player id
-            
             other_player = "Player1" if self.turn == "Player2" else "Player2"
+            print(f"The other player is: {other_player}")
 
             #handle if hit success or failure
             if self.game_state == "Hit success":
                 self.log_point(self.turn) #log 1 point to turn player
-                self.turn = other_player
                 self.game_state = "Waiting users"
+                self.log_game_state()
+
 
             if self.game_state == "Hit failure":
                 self.log_esquivos(other_player)
                 self.turn = other_player
+                self.log_turn()
                 self.game_state = "Waiting users"
+                self.log_game_state()
+
+        #debug
+        print(f"Game state: {self.game_state}")
+        print(f"Turn: {self.turn}")
+        Player1_holding = np.any(self.hits_buffer["Player1"][0,:])
+        Player2_holding = np.any(self.hits_buffer["Player2"][0,:])
+        print(f"Inner_pads: Player1:{Player1_holding}  Player2:{Player2_holding}")
 
     def log_turn(self):
         ''' 
@@ -188,6 +211,7 @@ class slap_game_service():
         '''
         point = Point("Turn").field("Turn",self.turn)
         self.ifdb_client.write(point)
+        self.mqttc.publish("/Turn",self.turn)  
     
     def log_game_state(self):
         ''' 
@@ -195,6 +219,7 @@ class slap_game_service():
         '''
         point = Point("Game state").field("Game state",self.game_state)
         self.ifdb_client.write(point)
+        self.mqttc.publish("/Game_state",self.game_state)  
     
     def log_point(self,player):
         ''' 
@@ -255,7 +280,7 @@ class slap_game_service():
 ######
 
 params = {
-    "mqtt_ip":'192.168.164.153',
+    "mqtt_ip":'192.168.1.113',
     "mqtt_port":1883, 
     "ifdb_tok":"XR0mXDy_ejp9yFOHy85jJBPtOILcYtd4wcf_FtLww3EOudxI6FxWPlQMuGLk-W794AphD1NO355_Lwsi9TwwHQ==", 
     "ifdb_ipport":"http://localhost:8086", 
