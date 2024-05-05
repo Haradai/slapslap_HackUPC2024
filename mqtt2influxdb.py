@@ -1,7 +1,11 @@
 from influxdb_client_3 import InfluxDBClient3, Point
 import paho.mqtt.client as mqtt
+import numpy as np
+import ast
+from datetime import datetime
+from datetime import timedelta
 
-class mqtt2influx2b():
+class slap_game_service():
     def __init__(self,mqtt_ip:str, mqtt_port:str, ifdb_tok:str, ifdb_ipport:str, ifdb_org:str, ifdb_db:str):
         '''
         params:
@@ -26,7 +30,35 @@ class mqtt2influx2b():
         self.mqtt_ip = mqtt_ip
         self.mqtt_port = mqtt_port
 
+        #CONFIG VARIABLES
+        self.N_SENSORS_PER_GLOVE = 6
+        self.BUFFER_N_SAMPLES = 5
+        self.ATTEMPT_TIMEOUT_SEC = 3
+
+        #SENSING VARIABLES
+        self.cap_values = {
+            "Player1": np.zeros(shape=(self.N_SENSORS_PER_GLOVE, self.BUFFER_N_SAMPLES)),
+            "Player2": np.zeros(shape=(self.N_SENSORS_PER_GLOVE, self.BUFFER_N_SAMPLES))
+        } 
         
+        #initially set to super big values to not see change
+        self.hits_buffer = {
+            "Player1": np.zeros(shape=(self.N_SENSORS_PER_GLOVE, self.BUFFER_N_SAMPLES)),
+            "Player2": np.zeros(shape=(self.N_SENSORS_PER_GLOVE, self.BUFFER_N_SAMPLES))
+        }
+
+        #GAME VARIABLES
+        self._turns = ["Init", "Player1", "Player2"]
+        self.old_turn = "Init"
+        self.turn = "Init" #Always player A starts
+
+        self._game_states = ["Waiting users", "Ready","Attemting hit","Hit success", "Hit failure","Anomaly"]
+        self.old_game_state = "Waiting users"
+        self.game_state = "Waiting" #Always start with rest
+        
+
+        self.attempt_hit_start = datetime.now()
+
     #Connect function
     def mqtt_on_connect(self, mqtt_client, userdata, flags, reason_code, properties):
         ''' 
@@ -34,28 +66,172 @@ class mqtt2influx2b():
         '''
         
         #subscribing
-        mqtt_client.subscribe('/Player1/Piezo1'),
-        mqtt_client.subscribe('/Player1/Piezo2'),
-        mqtt_client.subscribe('/Player1/Piezo3'),
-        mqtt_client.subscribe('/Player1/Piezo4'),
-        mqtt_client.subscribe('/Player2/Piezo1'),
-        mqtt_client.subscribe('/Player2/Piezo2'),
-        mqtt_client.subscribe('/Player2/Piezo3'),
-        mqtt_client.subscribe('/Player2/Piezo4')
-
+        mqtt_client.subscribe('/Player1'),
+        mqtt_client.subscribe('/Player2'),
         print(f"Connected with result code {reason_code}")
 
     #function called every time we receive a message
     def on_message(self, client, userdata, msg):
-        print(msg.topic+" "+str(msg.payload))
-        player = msg.topic[1:8]
-        piezo = msg.topic[9:]
-        piezo_value = int(msg.payload)
+        ''' 
+        this is the live loop that is alive thanks to the 
+        constant incoming values from mqtt sent by the esp32's
+        '''
+        #report turn to influxdb and TODO: mqtt?
+        self.log_turn()
+
+        #player sending message
+        player = msg.topic[1:]
+
+        #conert to dict the message
+        sensor_load = ast.literal_eval(str(msg.payload)[2:-1])
+
+        print(sensor_load)
+
+        sensor_values = sensor_load["Value"]
+        sensor_hits = sensor_load["Binary"]
+
+        #convert values to ints , they com in as strings
+        for key in sensor_values:
+            sensor_values[key] = int(sensor_values[key])
         
-        #create influxdb point and send
-        point = Point("PiezoSignal").tag("player",player).field(piezo,piezo_value)
-        self.ifdb_client.write(point)
+        for key in sensor_hits:
+            sensor_hits[key] = int(sensor_hits[key])
+        
+        #save values to influxdb
+        self.log_cap_vals(sensor_values, player)
+        self.log_cap_vals(sensor_hits, player, is_binary=True)
+        
+        self.update_hits_buffer(sensor_hits, player)
+        
+        #get hits sensing on both players
+        hits_player1 = np.any(self.hits_buffer["Player1"],axis=1)
+        hits_player2 = np.any(self.hits_buffer["Player2"],axis=1)     
+        
+        #Init each turn case:
+        if self.game_state == "Waiting users":
+            #check for both that last sensor (inside hand) is hit
+            if hits_player1[0] and hits_player2[0] :
+                #put provisional tag to tell game is about to start
+                self.turn = "Starting turn"
+                self.log_turn()
+                self.game_state = "Ready"
+
+        #actual game run (execissevely explicit for debugging purposes)
+        else:
+            if self.turn == "Player1":
+                if hits_player1[0]: #all sensors except last(inner hand sensor)
+                    pass
+                    #still ready
+                else:
+                    #started going for a hit! or already going for a hit. If rest change to going for a hit
+                    if self.game_state == "Ready":
+                        self.game_state = "Attempting hit"
+                        self.attempt_hit_start = datetime.now()
+
+                    #if already attempting a hit check for contrary player hit or separate or attempt timeout
+                    elif self.game_state == "Attempting hit":
+                        #check adversary hit (all sensors minus last one)
+                        if np.any(hits_player2[1:]):
+                            self.game_state  = "Hit success"
+
+                        else:
+                            #if time elapsed is greater than timeout change to failure
+                            elapsed = datetime.now() - self.attempt_hit_start
+                            if elapsed > timedelta(self.ATTEMPT_TIMEOUT_SEC):
+                                self.game_state = "Hit failure"
+                
+            if self.turn == "Player2":
+                if hits_player1[0]: #all sensors except last(inner hand sensor)
+                    pass
+                    #still resting
+                else:
+                    #started going for a hit! or already going for a hit. If rest change to going for a hit
+                    if self.game_state == "Ready":
+                        self.game_state = "Attempting hit"
+                        self.attempt_hit_start = datetime.now()
+
+                    #if already attempting a hit check for contrary player hit or separate or attempt timeout
+                    elif self.game_state == "Attempting hit":
+                        #check adversary hit (all sensors minus last one)
+                        if np.any(hits_player1[1:]):
+                            self.game_state  = "Hit success"
+
+                        else:
+                            #if time elapsed is greater than timeout change to failure
+                            elapsed = datetime.now() - self.attempt_hit_start
+                            if elapsed > timedelta(self.ATTEMPT_TIMEOUT_SEC):
+                                self.game_state = "Hit failure"
+                
+            #logs iteration game state
+            self.log_game_state()
             
+            #get other player id
+            
+            other_player = "Player1" if self.turn == "Player2" else "Player2"
+
+            #handle if hit success or failure
+            if self.game_state == "Hit success":
+                self.log_point(self.turn) #log 1 point to turn player
+                self.turn = other_player
+                self.game_state = "Waiting users"
+
+            if self.game_state == "Hit failure":
+                self.log_esquivos(other_player)
+                self.turn = other_player
+                self.game_state = "Waiting users"
+
+    def log_turn(self):
+        ''' 
+        Logs turn to influxdb
+
+        TODO: log value to mqtt so that gloves can read it and change led color
+        '''
+        point = Point("Turn").field("Turn",self.turn)
+        self.ifdb_client.write(point)
+    
+    def log_game_state(self):
+        ''' 
+        Logs game_state to influxdb
+        '''
+        point = Point("Game state").field("Game state",self.game_state)
+        self.ifdb_client.write(point)
+    
+    def log_point(self,player):
+        ''' 
+        Logs game_state to influxdb
+        '''
+        point = Point("Point").tag("player",player).field("Value",1)
+        self.ifdb_client.write(point)
+    
+    def log_esquivos(self,player):
+        ''' 
+        Logs game_state to influxdb
+        '''
+        point = Point("Esquivo").tag("player",player).field("Value",1)
+        self.ifdb_client.write(point)
+
+    def log_cap_vals(self, sensor_values:dict, player:str, is_binary:bool=False):
+        
+        ##Save point to influxdb
+        #create point for this timestamp and player
+        if is_binary:
+            point = Point("CapacitiveHits").tag("player",player)
+        else:
+            point = Point("CapacitiveSignal").tag("player",player)
+
+        #iterate over all sensors and add value to point as different fields.
+        for sensor_id, value in zip(sensor_values.keys(),sensor_values.values()):
+            point.field(sensor_id,value)
+    
+        #write point to influxdb
+        self.ifdb_client.write(point)
+
+    def update_hits_buffer(self, sensor_values:dict, player:str):
+        ##Update new values to piezo values
+        #Are saved as ordered in the json in the numpy array
+        sample = np.expand_dims(np.array(list(sensor_values.values())),axis=1)
+        self.hits_buffer[player] = np.concatenate( [self.hits_buffer[player][:,1:], sample] ,axis=1)
+
     def start(self):
         ''' 
         Starts listening to incoming mqtt messages.
@@ -64,6 +240,11 @@ class mqtt2influx2b():
         #quizas poner esto en una funcion
         self.mqttc.connect(self.mqtt_ip, self.mqtt_port, 60) #connect mqtt to client (el 60 que es?)
         self.mqttc.loop_forever()
+    
+    #def check_states_legality(sensors_array_playerA):
+        
+        #check if any
+
 
 ######
 ######
@@ -76,11 +257,11 @@ class mqtt2influx2b():
 params = {
     "mqtt_ip":'192.168.164.153',
     "mqtt_port":1883, 
-    "ifdb_tok":"ygYcYy950HBz1C1oj2oD6LUBfOyl-WiwkC47xiUPDfmJby3dv1DPlldTACZ1SXrJXjSoH97TZxNUcGKY5-XFdw==", 
+    "ifdb_tok":"XR0mXDy_ejp9yFOHy85jJBPtOILcYtd4wcf_FtLww3EOudxI6FxWPlQMuGLk-W794AphD1NO355_Lwsi9TwwHQ==", 
     "ifdb_ipport":"http://localhost:8086", 
-    "ifdb_org":"slapslap_organization", 
-    "ifdb_db":"slapslap_bucket"
+    "ifdb_org":"slap", 
+    "ifdb_db":"bucket"
 }
 
-mqtt_to_influxdb_object = mqtt2influx2b(*params.values())
+mqtt_to_influxdb_object = slap_game_service(*params.values())
 mqtt_to_influxdb_object.start()
