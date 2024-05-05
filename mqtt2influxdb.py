@@ -1,5 +1,5 @@
 from influxdb_client_3 import InfluxDBClient3, Point
-import paho.mqtt.client as mqtt
+import paho.mqtt.client as mqttç
 
 class mqtt2influx2b():
     def __init__(self,mqtt_ip:str, mqtt_port:str, ifdb_tok:str, ifdb_ipport:str, ifdb_org:str, ifdb_db:str):
@@ -22,6 +22,7 @@ class mqtt2influx2b():
         self.mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.mqttc.on_connect = self.mqtt_on_connect
         self.mqttc.on_message = self.on_message
+        self.player1_piezo1 = numpy.array
 
         self.mqtt_ip = mqtt_ip
         self.mqtt_port = mqtt_port
@@ -54,6 +55,9 @@ class mqtt2influx2b():
         #create influxdb point and send
         point = Point("PiezoSignal").tag(player).field(piezo,float(msg.payload))
         self.ifdb_client.write(point)
+    
+    def averagearray(self, )
+    
     
     def start(self):
         ''' 
